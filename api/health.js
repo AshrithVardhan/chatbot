@@ -1,7 +1,6 @@
-// GET /api/health — debug endpoint to diagnose Vercel deployment issues
-import { connectDB } from './_db.js';
+const { connectDB } = require('./_db.js');
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   const status = {
     env: {
       MONGO_URI:    process.env.MONGO_URI    ? '✅ set' : '❌ MISSING',
@@ -16,7 +15,7 @@ export default async function handler(req, res) {
     status.mongodb = '✅ connected';
     return res.status(200).json(status);
   } catch (err) {
-    status.mongodb = `❌ ${err.message}`;
+    status.mongodb = '❌ ' + err.message;
     return res.status(500).json(status);
   }
-}
+};

@@ -1,99 +1,84 @@
-// POST /api/chat — streams Groq response back via SSE
-// Uses Edge Runtime for proper streaming support on Vercel
-export const config = { runtime: 'edge' };
+const Groq   = require('groq-sdk');
+const { connectDB, Session } = require('./_db.js');
 
-import Groq from 'groq-sdk';
-
-export default async function handler(req) {
+module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
-    return new Response('Method Not Allowed', { status: 405 });
+    return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  const { sessionId, message } = await req.json();
+  const { sessionId, message } = req.body;
   if (!sessionId || !message) {
-    return new Response(JSON.stringify({ error: 'sessionId and message required' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
+    return res.status(400).json({ error: 'sessionId and message are required' });
+  }
+
+  try {
+    await connectDB();
+  } catch (err) {
+    return res.status(500).json({ error: 'DB connection failed: ' + err.message });
+  }
+
+  try {
+    const session = await Session.findById(sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    // Save user message first
+    session.messages.push({ role: 'user', content: message });
+    await session.save();
+
+    // Build history for Groq (all previous messages)
+    const history = session.messages.slice(0, -1).map(m => ({
+      role: m.role === 'ai' ? 'assistant' : 'user',
+      content: m.content,
+    }));
+
+    // Set up SSE streaming headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+    const stream = await groq.chat.completions.create({
+      model: 'groq/compound',
+      messages: [
+        { role: 'system', content: 'You are a helpful, concise, and intelligent AI assistant.' },
+        ...history,
+        { role: 'user', content: message },
+      ],
+      stream: true,
+      max_tokens: 2048,
+      temperature: 0.7,
     });
-  }
 
-  // Fetch session from our own API (edge → serverless)
-  const baseUrl = req.url.replace(/\/api\/chat.*/, '');
-  const sessionRes = await fetch(`${baseUrl}/api/sessions/${sessionId}`);
-  if (!sessionRes.ok) {
-    return new Response(JSON.stringify({ error: 'Session not found' }), { status: 404 });
-  }
-  const session = await sessionRes.json();
+    let fullText = '';
 
-  // Build history for Groq
-  const history = (session.messages || []).map(m => ({
-    role: m.role === 'ai' ? 'assistant' : 'user',
-    content: m.content,
-  }));
-
-  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
-  // Create a readable stream for SSE
-  const encoder = new TextEncoder();
-  let fullText = '';
-
-  const stream = new ReadableStream({
-    async start(controller) {
-      try {
-        const groqStream = await groq.chat.completions.create({
-          model: 'groq/compound',
-          messages: [
-            { role: 'system', content: 'You are a helpful, concise, and intelligent AI assistant.' },
-            ...history,
-            { role: 'user', content: message },
-          ],
-          stream: true,
-          max_tokens: 2048,
-          temperature: 0.7,
-        });
-
-        for await (const chunk of groqStream) {
-          const delta = chunk.choices[0]?.delta?.content ?? '';
-          if (delta) {
-            fullText += delta;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta })}\n\n`));
-          }
-        }
-
-        // Auto-title logic
-        let title = session.title;
-        if (title === 'New Conversation') {
-          title = message.trim().slice(0, 50) + (message.length > 50 ? '…' : '');
-        }
-
-        // Save user message + AI response + title to DB via sessions API
-        await fetch(`${baseUrl}/api/sessions/${sessionId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title }),
-        });
-
-        // Save messages via a dedicated save endpoint
-        await fetch(`${baseUrl}/api/sessions/${sessionId}/messages`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userMessage: message, aiMessage: fullText, title }),
-        });
-
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true, title })}\n\n`));
-        controller.close();
-      } catch (err) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: err.message })}\n\n`));
-        controller.close();
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta?.content ?? '';
+      if (delta) {
+        fullText += delta;
+        res.write(`data: ${JSON.stringify({ delta })}\n\n`);
       }
-    },
-  });
+    }
 
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-    },
-  });
-}
+    // Auto-title from first message
+    let title = session.title;
+    if (title === 'New Conversation') {
+      title = message.trim().slice(0, 50) + (message.length > 50 ? '…' : '');
+    }
+
+    // Save AI reply + title
+    session.messages.push({ role: 'ai', content: fullText });
+    session.title = title;
+    session.updatedAt = new Date();
+    await session.save();
+
+    res.write(`data: ${JSON.stringify({ done: true, title })}\n\n`);
+    res.end();
+
+  } catch (err) {
+    console.error('Chat error:', err);
+    res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+    res.end();
+  }
+};

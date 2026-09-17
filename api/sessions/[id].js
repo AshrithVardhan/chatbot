@@ -1,9 +1,6 @@
-// GET    /api/sessions/:id  → get one session with messages
-// PATCH  /api/sessions/:id  → update title
-// DELETE /api/sessions/:id  → delete session
-import { connectDB, Session } from '../../_db.js';
+const { connectDB, Session } = require('../../_db.js');
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   try {
     await connectDB();
   } catch (err) {
@@ -39,4 +36,4 @@ export default async function handler(req, res) {
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
-}
+};

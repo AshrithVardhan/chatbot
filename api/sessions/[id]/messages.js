@@ -1,24 +1,31 @@
-// POST /api/sessions/:id/messages — append user+AI messages to a session
-import { connectDB, Session } from '../../../_db.js';
+const { connectDB, Session } = require('../../../_db.js');
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', ['POST']);
     return res.status(405).end();
   }
 
-  await connectDB();
+  try {
+    await connectDB();
+  } catch (err) {
+    return res.status(500).json({ error: 'DB connection failed: ' + err.message });
+  }
 
-  const { id } = req.query;
-  const { userMessage, aiMessage, title } = req.body;
+  try {
+    const { id } = req.query;
+    const { userMessage, aiMessage, title } = req.body;
 
-  const session = await Session.findById(id);
-  if (!session) return res.status(404).json({ error: 'Session not found' });
+    const session = await Session.findById(id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
 
-  session.messages.push({ role: 'user',  content: userMessage });
-  session.messages.push({ role: 'ai',    content: aiMessage   });
-  if (title) session.title = title;
+    session.messages.push({ role: 'user', content: userMessage });
+    session.messages.push({ role: 'ai',   content: aiMessage   });
+    if (title) session.title = title;
 
-  await session.save();
-  return res.status(200).json({ ok: true });
-}
+    await session.save();
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
